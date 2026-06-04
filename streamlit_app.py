@@ -106,7 +106,7 @@ def apply_filters_and_rank(df, min_turnover):
     if df.empty:
         return df
     df = df.copy()
-    liq = df["Likuiditas (Rp Jt/hr)"] * 1e6
+    liq = pd.to_numeric(df["Likuiditas (Rp Jt/hr)"], errors="coerce") * 1e6
     # NaN (tanpa volume) dianggap lolos supaya tetap tampil
     mask = liq.isna() | (liq >= min_turnover)
     out = df[mask].copy()
@@ -222,12 +222,14 @@ def style_table(df):
         if v == "Tidak":
             return "background-color:#FFC7CE;color:#9C0006"
         return ""
-    sty = df.style.applymap(warna_layak, subset=["Layak?"])
+    base = df.style
+    _map = getattr(base, "map", None) or base.applymap  # pandas baru pakai .map
+    sty = _map(warna_layak, subset=["Layak?"])
     num = {c: "{:.3f}" for c in ["Overnight Avg %", "Net stlh Biaya %", "Volatilitas %"]}
     num.update({"Win Rate %": "{:.1f}", "Momentum 5h %": "{:.2f}",
                 "Momentum 20h %": "{:.2f}", "Skor": "{:.4f}",
                 "Harga Terakhir": "{:,.0f}", "Likuiditas (Rp Jt/hr)": "{:,.0f}"})
-    return sty.format({k: v for k, v in num.items() if k in df.columns})
+    return sty.format({k: v for k, v in num.items() if k in df.columns}, na_rep="-")
 
 
 def to_excel_bytes(df):
