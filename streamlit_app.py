@@ -1,138 +1,155 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Screener "Beli Sore - Jual Pagi" (Overnight) v2 - Streamlit
-============================================================
-Baru di v2:
-- Universe ~140 saham likuid BEI (bisa diedit).
-- Penarikan data BATCH + paralel -> jauh lebih cepat.
-- Harga terkoreksi split & dividen (auto_adjust) -> gap palsu hilang.
-- Uji statistik t-stat -> membedakan edge nyata vs kebetulan.
-- Verdict 3 tingkat: Layak / Hampir / Tidak + CATATAN ANALISA per saham.
+Screener Saham BEI - 3 STRATEGI (Streamlit) - v3
+=================================================
+Menu strategi:
+  🌙 Beli Sore - Jual Pagi  : beli di Close, jual di Open besok (overnight gap)
+  ☀️ Beli Pagi - Jual Sore  : beli di Open, jual di Close hari yang sama (intraday)
+  📈 Swing                  : beli & tahan N hari bursa (tren MA20/MA50)
+
+Tiap strategi punya perhitungan, verdict (Layak/Hampir/Tidak + t-stat),
+dan CATATAN ANALISA dengan alasan eksplisit per saham.
 
 ALAT BANTU RISET - bukan nasihat keuangan / sinyal beli-jual.
 """
 
 import io
-import datetime as dt
 import math
+import datetime as dt
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Screener Beli Sore - Jual Pagi",
+st.set_page_config(page_title="Screener Saham BEI - 3 Strategi",
                    page_icon="📈", layout="wide")
 
 # ====================== UNIVERSE ~140 SAHAM LIKUID BEI =======================
 DEFAULT_TICKERS = [
-    # Bank
     "BBCA.JK","BBRI.JK","BMRI.JK","BBNI.JK","BRIS.JK","BBTN.JK","ARTO.JK",
     "BJBR.JK","BJTM.JK","BNGA.JK","PNBN.JK","NISP.JK","BTPS.JK","BANK.JK",
     "BBHI.JK","BBYB.JK","SDRA.JK","AGRO.JK",
-    # Telko & menara
     "TLKM.JK","ISAT.JK","EXCL.JK","TOWR.JK","TBIG.JK","MTEL.JK","LINK.JK",
-    # Teknologi
     "GOTO.JK","BUKA.JK","EMTK.JK","BELI.JK","MTDL.JK","DMMX.JK",
-    # Otomotif & komponen
     "ASII.JK","UNTR.JK","AUTO.JK","DRMA.JK","SMSM.JK","GJTL.JK",
-    # Batu bara & kontraktor tambang
     "ADRO.JK","AADI.JK","ADMR.JK","PTBA.JK","ITMG.JK","INDY.JK","HRUM.JK",
     "BUMI.JK","DOID.JK","BYAN.JK","GEMS.JK","PTRO.JK","CUAN.JK",
-    # Migas & energi baru
     "MEDC.JK","PGAS.JK","PGEO.JK","ELSA.JK","ENRG.JK","AKRA.JK","RAJA.JK",
     "BREN.JK","CDIA.JK","RATU.JK",
-    # Logam & mineral
     "ANTM.JK","INCO.JK","MDKA.JK","TINS.JK","NCKL.JK","MBMA.JK","BRMS.JK",
     "PSAB.JK","HRTA.JK","AMMN.JK","NIKL.JK",
-    # Konsumer
     "UNVR.JK","ICBP.JK","INDF.JK","MYOR.JK","KLBF.JK","SIDO.JK","GGRM.JK",
     "HMSP.JK","WIIM.JK","CMRY.JK","ULTJ.JK","GOOD.JK","CLEO.JK",
-    # Ritel
     "AMRT.JK","MIDI.JK","MAPI.JK","MAPA.JK","ACES.JK","ERAA.JK","RALS.JK","LPPF.JK",
-    # Unggas
     "CPIN.JK","JPFA.JK","MAIN.JK",
-    # Semen & konstruksi
     "SMGR.JK","INTP.JK","WIKA.JK","PTPP.JK","ADHI.JK",
-    # Properti
     "CTRA.JK","BSDE.JK","PWON.JK","SMRA.JK","ASRI.JK","LPKR.JK","DMAS.JK",
     "PANI.JK","KIJA.JK","SSIA.JK",
-    # Infrastruktur & utilitas
     "JSMR.JK","POWR.JK",
-    # Kesehatan
     "MIKA.JK","HEAL.JK","SILO.JK","PRDA.JK",
-    # Petrokimia & gas industri
     "TPIA.JK","BRPT.JK","ESSA.JK","AGII.JK",
-    # Kertas
     "INKP.JK","TKIM.JK",
-    # Perkebunan
     "AALI.JK","LSIP.JK","DSNG.JK","TAPG.JK","SSMS.JK",
-    # Pelayaran & logistik
     "SMDR.JK","TMAS.JK","BIRD.JK","ASSA.JK",
-    # Media
     "MNCN.JK","SCMA.JK","FILM.JK",
-    # Pembiayaan & asuransi
     "BFIN.JK","ADMF.JK","PNLF.JK",
-    # Lain-lain likuid
     "SRTG.JK","ISSP.JK","WIFI.JK",
 ]
 
+STRAT_LABELS = {
+    "🌙 Beli Sore – Jual Pagi": "overnight",
+    "☀️ Beli Pagi – Jual Sore": "intraday",
+    "📈 Swing (tahan beberapa hari)": "swing",
+}
+DESKRIPSI = {
+    "overnight": "Mengukur **gap semalam**: beli di harga penutupan (Close), jual di "
+                 "pembukaan (Open) besok pagi. Cocok dieksekusi menjelang closing sore.",
+    "intraday": "Mengukur **gerak satu hari penuh**: beli di pembukaan (Open) pagi, jual "
+                "di penutupan (Close) sore di hari yang sama.",
+    "swing": "Mengukur **return menahan N hari bursa** (Close→Close, blok tidak tumpang-tindih) "
+             "plus struktur tren MA20/MA50 saat ini. Cocok untuk posisi beberapa hari–minggu.",
+}
+
 RINGKAS_COLS = ["Peringkat","Kode","Harga Terakhir","Net stlh Biaya %","Win Rate %",
-                "t-Stat","Momentum 20h %","Likuiditas (Rp Jt/hr)","Skor","Layak?"]
+                "t-Stat","Momentum 20h %","Tren MA","Likuiditas (Rp Jt/hr)","Skor","Layak?"]
 
 
 # ============================ PERHITUNGAN ====================================
-def compute_metrics(data, lookback, cost_pct):
-    """Hitung metrik overnight mentah per saham (verdict ditetapkan terpisah)."""
+def compute_metrics(data, lookback, cost_pct, mode, hold_n=5):
     cost = cost_pct / 100.0
-    min_days = max(20, min(30, lookback - 5))
     rows = []
     for t, df in data.items():
         df = df.sort_index().copy()
-        df["prev_close"] = df["Close"].shift(1)
-        df["overnight"] = df["Open"] / df["prev_close"] - 1.0
+        close, opn = df["Close"], df["Open"]
         has_vol = "Volume" in df.columns and df["Volume"].notna().any()
-        df["turnover"] = (df["Close"] * df["Volume"]) if has_vol else np.nan
+        df["turnover"] = (close * df["Volume"]) if has_vol else np.nan
+
+        # tren MA (dari seluruh riwayat)
+        ma20 = close.rolling(20).mean().iloc[-1] if len(close) >= 20 else np.nan
+        ma50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else np.nan
+        last_close = float(close.iloc[-1])
+        if not np.isnan(ma20) and not np.isnan(ma50):
+            tren = ("Naik kuat" if last_close > ma20 > ma50
+                    else ("Naik" if last_close > ma20 else "Turun"))
+        elif not np.isnan(ma20):
+            tren = "Naik" if last_close > ma20 else "Turun"
+        else:
+            tren = "-"
 
         recent = df.tail(lookback)
-        on = recent["overnight"].dropna()
-        # buang outlier ekstrem >20% (data error / suspend) supaya presisi
-        on = on[on.abs() <= 0.20]
-        if len(on) < min_days:
+        if mode == "overnight":
+            ser = (opn / close.shift(1) - 1).tail(lookback).dropna()
+            ser = ser[ser.abs() <= 0.20]
+            min_p = max(20, min(30, lookback - 5))
+        elif mode == "intraday":
+            ser = (close / opn - 1).tail(lookback).dropna()
+            ser = ser[ser.abs() <= 0.20]
+            min_p = max(20, min(30, lookback - 5))
+        else:  # swing: blok N-hari TIDAK tumpang tindih (statistik jujur)
+            c = recent["Close"].dropna().values
+            rets, i = [], len(c) - 1
+            while i - hold_n >= 0:
+                rets.append(c[i] / c[i - hold_n] - 1.0)
+                i -= hold_n
+            ser = pd.Series(rets)
+            ser = ser[ser.abs() <= 0.60]
+            min_p = 8
+        if len(ser) < min_p:
             continue
 
-        mean_on = on.mean(); std = on.std(); win = (on > 0).mean()
-        net = mean_on - cost
-        n = len(on)
-        t_stat = (mean_on / (std / math.sqrt(n))) if std and std > 0 else 0.0
+        mean_r = ser.mean(); std = ser.std(); win = (ser > 0).mean()
+        net = mean_r - cost
+        n = len(ser)
+        t_stat = (mean_r / (std / math.sqrt(n))) if std and std > 0 else 0.0
         avg_turn = recent["turnover"].mean() if has_vol else np.nan
-        last_close = df["Close"].iloc[-1]
-        mom5 = (df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1) if len(df) > 6 else np.nan
-        mom20 = (df["Close"].iloc[-1] / df["Close"].iloc[-21] - 1) if len(df) > 21 else np.nan
+        mom5 = (close.iloc[-1] / close.iloc[-6] - 1) if len(close) > 6 else np.nan
+        mom20 = (close.iloc[-1] / close.iloc[-21] - 1) if len(close) > 21 else np.nan
 
         rows.append({
             "Kode": t.replace(".JK", ""),
-            "Harga Terakhir": round(float(last_close), 2),
-            "Overnight Avg %": round(mean_on * 100, 3),
+            "Harga Terakhir": round(last_close, 2),
+            "Avg Return %": round(mean_r * 100, 3),
             "Net stlh Biaya %": round(net * 100, 3),
             "Win Rate %": round(win * 100, 1),
             "t-Stat": round(t_stat, 2),
             "Volatilitas %": round(std * 100, 3),
+            "Tren MA": tren,
             "Likuiditas (Rp Jt/hr)": (round(avg_turn / 1e6, 0)
                                       if not np.isnan(avg_turn) else None),
             "Momentum 5h %": round(mom5 * 100, 2) if not np.isnan(mom5) else None,
             "Momentum 20h %": round(mom20 * 100, 2) if not np.isnan(mom20) else None,
-            "Jml Hari": int(n),
+            "Periode": int(n),
             "Skor": round((net * 100.0) * win, 4),
         })
     return pd.DataFrame(rows)
 
 
-def tetapkan_verdict(df, minliq_jt):
-    """Verdict 3 tingkat + catatan analisa per saham (alasan eksplisit)."""
+def tetapkan_verdict(df, minliq_jt, mode, per_label):
     if df.empty:
         df["Layak?"] = []; df["Catatan Analisa"] = []
         return df
+
     def _bersih(v):
         return None if (v is None or (isinstance(v, float) and np.isnan(v))) else v
 
@@ -141,25 +158,36 @@ def tetapkan_verdict(df, minliq_jt):
         net, win, t = r["Net stlh Biaya %"], r["Win Rate %"], r["t-Stat"]
         mom = _bersih(r["Momentum 20h %"])
         liq = _bersih(r["Likuiditas (Rp Jt/hr)"])
-        hari = r["Jml Hari"]
-        liq_ok = (liq is None) or (liq >= minliq_jt)   # None = data tanpa volume
-        mom_ok = (mom is None) or (mom > 0)
+        tren = r["Tren MA"]; hari = r["Periode"]
+        liq_ok = (liq is None) or (liq >= minliq_jt)
 
-        gerbang = {
-            f"net {net:+.3f}%/malam stlh biaya": net > 0,
-            f"win rate {win:.0f}%": win >= 55,
-            ("tren 20h " + (f"{mom:+.1f}%" if mom is not None else "n/a")): mom_ok,
-        }
+        if mode == "swing":
+            tren_ok = tren in ("Naik", "Naik kuat")
+            gerbang = {
+                f"net {net:+.3f}%{per_label}": net > 0,
+                f"win rate {win:.0f}%": win >= 55,
+                f"tren MA ({tren})": tren_ok,
+            }
+        else:
+            mom_ok = (mom is None) or (mom > 0)
+            gerbang = {
+                f"net {net:+.3f}%{per_label}": net > 0,
+                f"win rate {win:.0f}%": win >= 55,
+                ("momentum 20h " + (f"{mom:+.1f}%" if mom is not None else "n/a")): mom_ok,
+            }
         lolos = sum(gerbang.values())
         signifikan = t >= 1.5
+
+        liq_txt = (f"; likuid Rp {liq/1000:.1f} M/hr → mudah keluar-masuk"
+                   if liq is not None else "")
+        tren_txt = f"; struktur tren {tren} (MA20/MA50)" if tren != "-" else ""
 
         if lolos == 3 and signifikan and liq_ok:
             v = "Layak"
             kekuatan = "kuat" if t >= 2 else "cukup meyakinkan"
-            c = (f"LAYAK diriset: untung bersih {net:+.3f}%/malam stabil selama {hari} hr "
-                 f"(menang {win:.0f}% hari; t={t:.1f} → edge {kekuatan}, bukan kebetulan); "
-                 f"tren 20h {mom:+.1f}%" + 
-                 (f"; likuid Rp {liq/1000:.1f} M/hr → mudah keluar di opening." if liq is not None else "."))
+            c = (f"LAYAK diriset: untung bersih {net:+.3f}%{per_label} stabil dari "
+                 f"{hari} periode (menang {win:.0f}%; t={t:.1f} → edge {kekuatan}, "
+                 f"bukan kebetulan){tren_txt}{liq_txt}.")
         elif lolos == 3 and liq_ok and not signifikan:
             v = "Hampir"
             c = (f"Hampir: semua syarat lolos TAPI edge belum signifikan (t={t:.1f} < 1.5) "
@@ -174,8 +202,9 @@ def tetapkan_verdict(df, minliq_jt):
             c = "Tidak lolos: " + "; ".join(gagal) + "."
         if not liq_ok and v != "Tidak":
             v = "Hampir"
-            c += f" (Catatan: likuiditas Rp {liq/1000:.1f} M/hr di bawah ambang — hati-hati slippage.)"
+            c += f" (Likuiditas Rp {liq/1000:.1f} M/hr di bawah ambang — hati-hati slippage.)"
         verdicts.append(v); catatans.append(c)
+
     df = df.copy()
     df["Layak?"] = verdicts
     df["Catatan Analisa"] = catatans
@@ -198,9 +227,8 @@ def rank(df, minliq_jt):
 # ============================ SUMBER DATA ====================================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_live(tickers_tuple, lookback):
-    """Tarik batch dari Yahoo (paralel, harga terkoreksi split/dividen)."""
     import yfinance as yf
-    period = f"{max(lookback + 50, 130)}d"
+    period = f"{max(lookback + 60, 140)}d"
     tickers = list(tickers_tuple)
     data, gagal = {}, []
     CHUNK = 40
@@ -258,9 +286,23 @@ def parse_csv(file):
     return data
 
 
+def data_ke_long_csv(data):
+    """Gabungkan dict harga -> CSV long (cadangan utk fitur Upload CSV)."""
+    frames = []
+    for t, df in data.items():
+        g = df.copy()
+        g.index.name = "Date"
+        g = g.reset_index()
+        g["Ticker"] = t.replace(".JK", "")
+        g["Date"] = pd.to_datetime(g["Date"]).dt.date
+        frames.append(g[["Date", "Ticker", "Open", "High", "Low", "Close", "Volume"]])
+    out = pd.concat(frames, ignore_index=True)
+    return out.to_csv(index=False).encode("utf-8")
+
+
 def demo_data(tickers, lookback, seed=7):
     rng = np.random.default_rng(seed)
-    dates = pd.bdate_range(end=dt.date.today(), periods=lookback + 60)
+    dates = pd.bdate_range(end=dt.date.today(), periods=lookback + 70)
     data = {}
     for i, t in enumerate(tickers):
         price = 500.0 * (1 + (i % 10) * 0.4)
@@ -269,7 +311,7 @@ def demo_data(tickers, lookback, seed=7):
         for d in dates:
             prev = price
             op = prev * (1 + rng.normal(drift, 0.010))
-            cp = op * (1 + rng.normal(-0.0002, 0.013))
+            cp = op * (1 + rng.normal(drift * 0.6, 0.013))
             hi = max(op, cp) * (1 + abs(rng.normal(0, 0.004)))
             lo = min(op, cp) * (1 - abs(rng.normal(0, 0.004)))
             vol = int(rng.integers(3_000_000, 90_000_000))
@@ -285,10 +327,20 @@ def style_table(df):
         if v == "Hampir": return "background-color:#FFEB9C;color:#9C6500;font-weight:bold"
         if v == "Tidak":  return "background-color:#FFC7CE;color:#9C0006"
         return ""
+    def warna_tren(v):
+        if v == "Naik kuat": return "color:#067d37;font-weight:700"
+        if v == "Naik":      return "color:#067d37"
+        if v == "Turun":     return "color:#c00000"
+        return ""
     base = df.style
     _map = getattr(base, "map", None) or base.applymap
-    sty = _map(warna, subset=["Layak?"]) if "Layak?" in df.columns else base
-    num = {"Overnight Avg %":"{:+.3f}","Net stlh Biaya %":"{:+.3f}","Volatilitas %":"{:.3f}",
+    sty = base
+    if "Layak?" in df.columns:
+        sty = _map(warna, subset=["Layak?"])
+        _map = getattr(sty, "map", None) or sty.applymap
+    if "Tren MA" in df.columns:
+        sty = _map(warna_tren, subset=["Tren MA"])
+    num = {"Avg Return %":"{:+.3f}","Net stlh Biaya %":"{:+.3f}","Volatilitas %":"{:.3f}",
            "Win Rate %":"{:.1f}","t-Stat":"{:.2f}","Momentum 5h %":"{:+.2f}",
            "Momentum 20h %":"{:+.2f}","Skor":"{:.4f}","Harga Terakhir":"{:,.0f}",
            "Likuiditas (Rp Jt/hr)":"{:,.0f}"}
@@ -303,33 +355,43 @@ def to_excel_bytes(df):
 
 
 def main():
-    st.title("📈 Screener Beli Sore – Jual Pagi")
-    st.caption("v2 — universe ~140 saham likuid, harga terkoreksi split/dividen, "
-               "uji statistik t-stat, dan catatan analisa per saham. "
-               "**Alat bantu riset — bukan rekomendasi / sinyal beli-jual.**")
+    st.title("📈 Screener Saham BEI — 3 Strategi")
+
+    pilih = st.radio("Pilih strategi:", list(STRAT_LABELS.keys()), horizontal=True)
+    mode = STRAT_LABELS[pilih]
+    st.caption(DESKRIPSI[mode] + " **Alat bantu riset — bukan rekomendasi/sinyal beli-jual.**")
 
     with st.expander("⚠️ Cara baca & arti 'Layak' (klik)"):
         st.markdown(
-            "- **Net stlh Biaya %** — rata-rata untung per malam SETELAH biaya transaksi. "
-            "Inilah angka realistisnya.\n"
-            "- **t-Stat** — uji statistik: ≥2 edge kuat, 1.5–2 cukup, <1.5 bisa cuma kebetulan.\n"
-            "- **✅ Layak** = net>0 **dan** win rate ≥55% **dan** tren 20h naik **dan** t≥1.5 "
-            "**dan** cukup likuid. Syarat sengaja ketat — wajar kalau sering hanya 0–5 saham.\n"
+            "- **Net stlh Biaya %** — rata-rata untung per transaksi SETELAH biaya. "
+            "Untuk swing, biaya hanya dihitung sekali per siklus tahan.\n"
+            "- **t-Stat** — uji statistik: ≥2 edge kuat, 1.5–2 cukup, <1.5 bisa kebetulan.\n"
+            "- **Tren MA** — posisi harga vs rata-rata 20 & 50 hari: *Naik kuat* = harga > MA20 > MA50.\n"
+            "- **✅ Layak** = net>0 + win rate ≥55% + tren mendukung + t≥1.5 + cukup likuid. "
+            "Syarat ketat — wajar bila hanya 0–5 saham.\n"
             "- **🟡 Hampir** = gagal tipis di satu syarat → kandidat pantauan.\n"
-            "- **'Layak: 0' bukan error** — artinya saat ini gap semalam rata-rata memang "
-            "lebih kecil dari biaya. Itu informasi berharga: jangan dipaksakan.\n"
+            "- **'Layak: 0' bukan error** — artinya strategi ini sedang tidak menguntungkan "
+            "setelah biaya. Itu informasi berharga.\n"
             "- Kinerja masa lalu tidak menjamin hasil ke depan. Risiko di tangan Anda."
         )
 
     sb = st.sidebar
     sb.header("⚙️ Pengaturan")
     sumber = sb.radio("Sumber data", ["Live (Yahoo Finance)", "Upload CSV", "Data contoh (demo)"])
-    lookback = sb.slider("Hari bursa dianalisis", 20, 180, 60, 5,
-                         help="60 disarankan. Terlalu panjang = pola lama yang sudah basi ikut terhitung.")
+
+    hold_n = 5
+    if mode == "swing":
+        hold_n = sb.slider("Lama tahan (hari bursa)", 3, 20, 5,
+                           help="Berapa hari posisi ditahan sebelum dijual.")
+    default_lb = 120 if mode == "swing" else 60
+    lookback = sb.slider("Hari bursa dianalisis", 20, 240, default_lb, 5,
+                         help="Swing butuh riwayat lebih panjang (disarankan ≥120).")
+    if mode == "swing" and lookback < hold_n * 10:
+        sb.warning(f"Untuk tahan {hold_n} hr, sebaiknya 'Hari dianalisis' ≥ {hold_n*10} "
+                   f"agar sampel cukup.")
     cost = sb.number_input("Biaya bolak-balik (%)", 0.0, 2.0, 0.40, 0.05,
-                           help="Fee beli + fee jual broker Anda. Contoh 0.15+0.25 = 0.40")
-    minliq = sb.number_input("Likuiditas min (Rp Juta/hari)", 0, 500_000, 5_000, 500,
-                             help="5000 = Rp 5 miliar/hari. Jangan terlalu kecil untuk strategi overnight.")
+                           help="Fee beli + jual broker Anda. Contoh 0.15+0.25 = 0.40")
+    minliq = sb.number_input("Likuiditas min (Rp Juta/hari)", 0, 500_000, 5_000, 500)
     top_n = sb.slider("Tampilkan Top-N", 5, 150, 25)
     tampil = sb.radio("Tampilkan", ["Semua", "Layak + Hampir", "Hanya Layak"])
     semua_kolom = sb.checkbox("Tampilkan semua kolom")
@@ -343,7 +405,7 @@ def main():
                             ", ".join(t.replace(".JK","") for t in DEFAULT_TICKERS), height=140)
         tickers = [x.strip().upper() + (".JK" if not x.strip().upper().endswith(".JK") else "")
                    for x in teks.split(",") if x.strip()]
-        sb.caption(f"{len(tickers)} saham — penarikan batch ±1–2 menit (di-cache 30 menit).")
+        sb.caption(f"{len(tickers)} saham — penarikan batch ±1–2 menit (cache 30 menit).")
         if sb.button("🔄 Refresh data (hapus cache)"):
             fetch_live.clear()
 
@@ -352,10 +414,10 @@ def main():
         with st.spinner(f"Menarik {len(tickers)} saham dari Yahoo (batch)..."):
             data, gagal = fetch_live(tuple(tickers), lookback)
         if not data:
-            st.error("Gagal menarik data live. Coba tombol Refresh, atau pakai Upload CSV / Data contoh.")
+            st.error("Gagal menarik data live. Coba Refresh, atau pakai Upload CSV / Data contoh.")
             return
         if gagal:
-            st.caption(f"ℹ️ {len(gagal)} kode dilewati (tidak ada data): "
+            st.caption(f"ℹ️ {len(gagal)} kode dilewati: "
                        + ", ".join(g.replace(".JK","") for g in gagal[:15])
                        + (" ..." if len(gagal) > 15 else ""))
     elif sumber == "Upload CSV":
@@ -369,14 +431,18 @@ def main():
         if not data:
             st.error("Tidak ada saham dengan data cukup."); return
     else:
-        data = demo_data(DEFAULT_TICKERS[:60], lookback)
+        data = demo_data(DEFAULT_TICKERS[:60], max(lookback, 120))
         st.warning("Mode **DATA CONTOH (simulasi)** — angka PALSU, hanya untuk lihat tampilan.")
 
     # ---------- hitung ----------
-    met = compute_metrics(data, lookback, cost)
+    per_label = {"overnight": "/malam", "intraday": "/hari",
+                 "swing": f"/{hold_n} hr"}[mode]
+    met = compute_metrics(data, lookback, cost, mode, hold_n)
     if met.empty:
-        st.error("Data terlalu sedikit untuk dihitung (butuh ±20 hari per saham)."); return
-    met = tetapkan_verdict(met, minliq)
+        st.error("Data terlalu pendek untuk strategi & periode ini. "
+                 "Perbesar 'Hari dianalisis' atau perkecil 'Lama tahan'.")
+        return
+    met = tetapkan_verdict(met, minliq, mode, per_label)
     ranked = rank(met, minliq)
 
     n_layak = int((met["Layak?"] == "Layak").sum())
@@ -388,10 +454,8 @@ def main():
     c4.metric("Tanggal", dt.date.today().isoformat())
 
     if n_layak == 0:
-        st.info("**Tidak ada yang 'Layak' hari ini — itu temuan, bukan error.** Artinya dalam "
-                f"{lookback} hari terakhir tidak ada saham yang gap malamnya konsisten menutup "
-                f"biaya {cost:.2f}%. Lihat tingkat **🟡 Hampir** di bawah untuk kandidat pantauan, "
-                "dan baca Catatan Analisa-nya kenapa mereka belum lolos.")
+        st.info(f"**Tidak ada yang 'Layak' untuk strategi {pilih} saat ini — itu temuan, "
+                f"bukan error.** Lihat tingkat 🟡 Hampir dan Catatan Analisa-nya.")
 
     if tampil == "Hanya Layak":
         ranked = ranked[ranked["Layak?"] == "Layak"].reset_index(drop=True)
@@ -403,23 +467,29 @@ def main():
                    else [c for c in RINGKAS_COLS if c in show.columns])
     st.dataframe(style_table(show[tampil_cols]), use_container_width=True, height=520)
 
-    # ---------- catatan analisa ----------
     st.subheader("📝 Catatan Analisa")
-    st.caption("Alasan eksplisit per saham — kenapa layak / hampir / tidak. (Top 10 dari tampilan di atas)")
+    st.caption(f"Strategi: {pilih} — alasan eksplisit per saham (Top 10 dari tampilan di atas).")
     ikon = {"Layak": "✅", "Hampir": "🟡", "Tidak": "❌"}
     for _, r in show.head(10).iterrows():
         st.markdown(f"{ikon.get(r['Layak?'],'')} **{int(r['Peringkat'])}. {r['Kode']}** — {r['Catatan Analisa']}")
 
-    d1, d2 = st.columns(2)
-    d1.download_button("⬇️ Unduh CSV (lengkap + catatan)", ranked.to_csv(index=False).encode("utf-8"),
-                       f"hasil_screener_{dt.date.today()}.csv", "text/csv", use_container_width=True)
-    d2.download_button("⬇️ Unduh Excel", to_excel_bytes(ranked),
-                       f"hasil_screener_{dt.date.today()}.xlsx",
+    d1, d2, d3 = st.columns(3)
+    d1.download_button("⬇️ Hasil CSV", ranked.to_csv(index=False).encode("utf-8"),
+                       f"hasil_{mode}_{dt.date.today()}.csv", "text/csv",
+                       use_container_width=True)
+    d2.download_button("⬇️ Hasil Excel", to_excel_bytes(ranked),
+                       f"hasil_{mode}_{dt.date.today()}.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                        use_container_width=True)
+    if sumber == "Live (Yahoo Finance)":
+        d3.download_button("💾 Data mentah (cadangan)", data_ke_long_csv(data),
+                           f"data_saham_{dt.date.today()}.csv", "text/csv",
+                           use_container_width=True,
+                           help="Simpan sebagai cadangan. Bisa di-upload lagi lewat menu "
+                                "'Upload CSV' kalau suatu saat Live gagal.")
 
-    st.caption("Urutan berdasar **Skor = Net% × Win Rate** (seri: t-Stat). Walau 'Layak', tetap cek "
-               "berita & antrian bid-offer sebelum ambil posisi — dan jangan lupa risiko gap turun.")
+    st.caption("Urutan berdasar **Skor = Net% × Win Rate** (seri: t-Stat). Walau 'Layak', "
+               "tetap cek berita & bid-offer sebelum ambil posisi.")
 
 
 if __name__ == "__main__":
